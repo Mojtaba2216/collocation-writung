@@ -260,45 +260,7 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
         }
     }
 
-    // Safe memory-optimized ad image loader
-    val adImageBitmap = remember(showAdDialog) {
-        if (!showAdDialog) null else {
-            try {
-                val options = BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
-                }
-                BitmapFactory.decodeResource(context.resources, R.drawable.javaneh_ad_poster, options)
-                
-                if (options.outWidth <= 0 || options.outHeight <= 0) {
-                    Log.e("JavaneyarAd", "Ad image asset not found or invalid.")
-                    null
-                } else {
-                    options.inSampleSize = calculateInSampleSize(options, 512, 768)
-                    options.inJustDecodeBounds = false
-                    val bitmap = BitmapFactory.decodeResource(context.resources, R.drawable.javaneh_ad_poster, options)
-                    if (bitmap == null) {
-                        Log.e("JavaneyarAd", "Decoded bitmap is null.")
-                        null
-                    } else {
-                        bitmap.asImageBitmap()
-                    }
-                }
-            } catch (e: Throwable) {
-                Log.e("JavaneyarAd", "Error loading ad image: ${e.message}", e)
-                null
-            }
-        }
-    }
 
-    // Automatically dismiss the ad dialog if the image cannot be loaded
-    LaunchedEffect(showAdDialog, adImageBitmap) {
-        if (showAdDialog && adImageBitmap == null) {
-            Log.e("JavaneyarAd", "Ad dialog triggered but asset is invalid or missing. Dismissing ad.")
-            showAdDialog = false
-            activeSeconds = 0
-            isAdPending = false
-        }
-    }
 
     // Ad countdown timer based on real system time (cannot be paused or bypassed by backgrounding)
     LaunchedEffect(showAdDialog) {
@@ -471,11 +433,10 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
         }
         
         // Show the Javaneyar Ad Dialog if triggered
-        if (showAdDialog && adImageBitmap != null) {
+        if (showAdDialog) {
             JavaneyarAdDialog(
                 onAdClicked = onAdClicked,
-                countdownSeconds = adCountdownSeconds,
-                imageBitmap = adImageBitmap
+                countdownSeconds = adCountdownSeconds
             )
         }
     }
@@ -493,8 +454,7 @@ fun NavigationBarItemColors() = NavigationBarItemDefaults.colors(
 @Composable
 fun JavaneyarAdDialog(
     onAdClicked: () -> Unit,
-    countdownSeconds: Int,
-    imageBitmap: ImageBitmap
+    countdownSeconds: Int
 ) {
     Dialog(
         onDismissRequest = {}, // Empty lambda prevents dismissal on outside tap or back press
@@ -567,7 +527,7 @@ fun JavaneyarAdDialog(
                     contentAlignment = Alignment.Center
                 ) {
                     Image(
-                        bitmap = imageBitmap,
+                        painter = painterResource(R.drawable.javaneh_ad_poster),
                         contentDescription = "تبلیغ پلتفرم جوانه",
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Fit
