@@ -37,7 +37,7 @@ jobs:
 
           if [ -z "$SETTINGS_PATH" ]; then
             echo "::error::settings.gradle.kts پیدا نشد."
-            find "$GITHUB_WORKSPACE" -maxdepth 4 -type f | sort | head -n 200
+            find "$GITHUB_WORKSPACE" -maxdepth 5 -type f | sort | head -n 200
             exit 1
           fi
 
@@ -52,10 +52,10 @@ jobs:
           cd "$PROJECT_DIR"
 
           if [ ! -f ".env.example" ]; then
-            cat > .env.example <<'EOF'
-          # Example environment variables
-          # Do not place real secrets in this file.
-          EOF
+            printf '%s\n' \
+              '# Example environment variables' \
+              '# Do not place real secrets in this file.' \
+              > .env.example
           fi
 
           echo ".env.example is ready."
@@ -83,6 +83,31 @@ jobs:
           echo "Project structure is valid."
           java -version
           gradle --version
+
+      - name: Create debug keystore
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          if [ ! -f "debug.keystore" ]; then
+            keytool -genkeypair \
+              -keystore "debug.keystore" \
+              -storepass "android" \
+              -alias "androiddebugkey" \
+              -keypass "android" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -noprompt
+          fi
+
+          test -f "debug.keystore" || {
+            echo "::error::debug.keystore ساخته نشد."
+            exit 1
+          }
+
+          echo "Debug keystore created successfully."
 
       - name: Build Debug APK
         shell: bash
