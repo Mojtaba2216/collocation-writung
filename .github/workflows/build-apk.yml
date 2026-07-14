@@ -15,67 +15,123 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout project
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
+
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "9.3.1"
+          validate-wrappers: false
+
+      - name: Find Android project
+        shell: bash
+        run: |
+          SETTINGS_PATH="$(find "$GITHUB_WORKSPACE" -type f -name "settings.gradle.kts" | head -n 1)"
+
+          if [ -z "$SETTINGS_PATH" ]; then
+            echo "::error::settings.gradle.kts پیدا نشد."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$SETTINGS_PATH")"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Android project found at: $PROJECT_DIR"
+
+      - name: Prepare environment file
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          if [ ! -f ".env.example" ]; then
+            printf '%s\n' \
+              '# Example environment variables' \
+              '# Do not place real secrets in this file.' \
+              > .env.example
+          fi
 
       - name: Verify required files
         shell: bash
         run: |
+          cd "$PROJECT_DIR"
+
           test -f settings.gradle.kts || {
-            echo "::error::settings.gradle.kts not found"
+            echo "::error::settings.gradle.kts پیدا نشد."
             exit 1
           }
 
           test -f build.gradle.kts || {
-            echo "::error::build.gradle.kts not found"
-            exit 1
-          }
-
-          test -f .env.example || {
-            echo "::error::.env.example not found"
-            exit 1
-          }
-
-          test -f gradlew || {
-            echo "::error::gradlew not found"
+            echo "::error::build.gradle.kts پیدا نشد."
             exit 1
           }
 
           test -d app || {
-            echo "::error::app module not found"
+            echo "::error::پوشه app پیدا نشد."
             exit 1
           }
 
-      - name: Make Gradle executable
-        run: chmod +x gradlew
+          echo "Project structure is valid."
 
       - name: Show Gradle version
-        run: ./gradlew --version
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          gradle --version
+
+      - name: Create debug keystore
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          if [ ! -f "debug.keystore" ]; then
+            keytool -genkeypair \
+              -keystore "debug.keystore" \
+              -storepass "android" \
+              -alias "androiddebugkey" \
+              -keypass "android" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -noprompt
+          fi
+
+          test -f "debug.keystore" || {
+            echo "::error::debug.keystore ساخته نشد."
+            exit 1
+          }
 
       - name: Build Debug APK
-        run: ./gradlew :app:assembleDebug --stacktrace --no-daemon
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          gradle :app:assembleDebug --stacktrace --no-daemon
 
       - name: Verify APK
         shell: bash
         run: |
-          find app/build/outputs/apk -type f -name "*.apk" -print
+          APK_FILES="$(find "$GITHUB_WORKSPACE" -type f -path "*/app/build/outputs/apk/debug/*.apk")"
 
-          test -n "$(find app/build/outputs/apk/debug -type f -name '*.apk' 2>/dev/null)" || {
-            echo "::error::Debug APK not found"
+          if [ -z "$APK_FILES" ]; then
+            echo "::error::فایل APK ساخته نشد."
             exit 1
-          }
+          fi
+
+          echo "Generated APK:"
+          echo "$APK_FILES"
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: IELTS-Leitner-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: "**/app/build/outputs/apk/debug/*.apk"
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
