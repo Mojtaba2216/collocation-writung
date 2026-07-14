@@ -17,8 +17,8 @@ android {
     applicationId = "com.aistudio.ieltscollocationleitner.kxmpzq"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "1.2"
+    versionCode = 4
+    versionName = "1.0-test20"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

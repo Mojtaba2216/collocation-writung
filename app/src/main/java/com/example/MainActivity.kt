@@ -101,14 +101,15 @@ import androidx.compose.ui.graphics.asImageBitmap
 import android.os.SystemClock
 import android.util.Log
 
-// Central Constants for Javaneyar Ad Timing
-const val FIRST_AD_DELAY_SECONDS = 60 // 1 minute (60 seconds)
-const val REPEAT_AD_INTERVAL_SECONDS = 420 // 7 minutes (420 seconds)
-const val AD_DURATION_SECONDS = 15
+// Central Constants for Javaneyar Ad Timing based on Build Mode (Debug/Release)
+val FIRST_AD_DELAY_MILLIS = if (BuildConfig.DEBUG) 20_000L else 60_000L
+val REPEAT_AD_INTERVAL_MILLIS = if (BuildConfig.DEBUG) 30_000L else 420_000L
+const val AD_DURATION_MILLIS = 15_000L
 
 // Compatibility constants for existing tests
 const val AD_INTERVAL_SECONDS = 420
 const val AD_INTERVAL_MILLIS = 420000L
+const val AD_DURATION_SECONDS = 15
 
 fun Context.findActivity(): Activity? {
     var context = this
@@ -169,42 +170,9 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
 
     // Javaneyar Ad Timer Logic
     val context = LocalContext.current
-    
-    // Session-level Ad state (preserved across configuration changes/rotations, reset on full app close)
+    var isAdVisible by rememberSaveable { mutableStateOf(false) }
     var isFirstAdShown by rememberSaveable { mutableStateOf(false) }
-    var elapsedActiveSeconds by rememberSaveable { mutableStateOf(0) }
-    var showAdDialog by rememberSaveable { mutableStateOf(false) }
-    var adCountdownSeconds by rememberSaveable { mutableStateOf(AD_DURATION_SECONDS) }
-
-    // Memory-Optimized Ad Image Loader (decodes only once per dialog show, prevents OOM)
-    val adImageBitmap = remember(showAdDialog) {
-        if (!showAdDialog) null else {
-            try {
-                val options = BitmapFactory.Options().apply {
-                    inJustDecodeBounds = true
-                }
-                BitmapFactory.decodeResource(context.resources, R.drawable.javaneh_ad_poster, options)
-                
-                if (options.outWidth <= 0 || options.outHeight <= 0) {
-                    Log.e("JAVANEH_AD", "Error showing ad: image asset not found or invalid.")
-                    null
-                } else {
-                    options.inSampleSize = calculateInSampleSize(options, 600, 900)
-                    options.inJustDecodeBounds = false
-                    val bitmap = BitmapFactory.decodeResource(context.resources, R.drawable.javaneh_ad_poster, options)
-                    if (bitmap == null) {
-                        Log.e("JAVANEH_AD", "Error showing ad: decoded bitmap is null.")
-                        null
-                    } else {
-                        bitmap.asImageBitmap()
-                    }
-                }
-            } catch (e: Throwable) {
-                Log.e("JAVANEH_AD", "Error showing ad: ${e.message}", e)
-                null
-            }
-        }
-    }
+    var elapsedActiveMillis by rememberSaveable { mutableStateOf(0L) }
     
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var isAppActive by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
@@ -230,81 +198,63 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
         }
     }
 
+    LaunchedEffect(Unit) {
+        if (BuildConfig.DEBUG) {
+            Log.d("JAVANEH_AD", "Scheduler created")
+        }
+    }
+
     // Single Active Usage Timer Scheduler
-    LaunchedEffect(isAppActive, showAdDialog, isFirstAdShown) {
-        if (isAppActive && !showAdDialog) {
-            Log.d("JAVANEH_AD", "Scheduler started")
-            while (true) {
-                delay(1000L)
-                elapsedActiveSeconds++
-                
-                val currentTarget = if (!isFirstAdShown) FIRST_AD_DELAY_SECONDS else REPEAT_AD_INTERVAL_SECONDS
-                if (elapsedActiveSeconds >= currentTarget) {
-                    Log.d("JAVANEH_AD", "Interval reached")
-                    
-                    // Verify safe display conditions
-                    val activity = context.findActivity()
-                    val isValid = activity != null && !activity.isFinishing && !activity.isDestroyed
-                    
-                    if (isValid) {
-                        Log.d("JAVANEH_AD", "Showing ad")
-                        showAdDialog = true
-                        adCountdownSeconds = AD_DURATION_SECONDS
-                    } else {
-                        Log.e("JAVANEH_AD", "Error showing ad: activity not valid")
-                    }
+    LaunchedEffect(isAppActive, isAdVisible, isFirstAdShown) {
+        if (isAppActive && !isAdVisible) {
+            if (BuildConfig.DEBUG) {
+                Log.d("JAVANEH_AD", "Timer started")
+            }
+            
+            val targetDelayMillis = if (!isFirstAdShown) {
+                val delayVal = FIRST_AD_DELAY_MILLIS
+                if (BuildConfig.DEBUG) {
+                    Log.d("JAVANEH_AD", "First delay selected: $delayVal")
+                }
+                delayVal
+            } else {
+                val delayVal = REPEAT_AD_INTERVAL_MILLIS
+                delayVal
+            }
+
+            while (elapsedActiveMillis < targetDelayMillis) {
+                delay(100L)
+                if (isAppActive && !isAdVisible) {
+                    elapsedActiveMillis += 100L
                 }
             }
-        }
-    }
 
-    // Ad countdown timer using SystemClock.elapsedRealtime (robust, cannot be bypassed by backgrounding)
-    LaunchedEffect(showAdDialog) {
-        if (showAdDialog) {
-            Log.d("JAVANEH_AD", "Dialog composed")
-            Log.d("JAVANEH_AD", "Countdown started")
-            val startTime = SystemClock.elapsedRealtime()
-            val adEndTime = startTime + AD_DURATION_SECONDS * 1000L
+            if (BuildConfig.DEBUG) {
+                Log.d("JAVANEH_AD", "Timer reached")
+            }
+
+            // Verify safe display conditions
+            val activity = context.findActivity()
+            val isActivityValid = activity != null && !activity.isFinishing && !activity.isDestroyed
+            val isForeground = isAppActive
             
-            while (showAdDialog) {
-                val now = SystemClock.elapsedRealtime()
-                val remainingMillis = adEndTime - now
-                val remainingSeconds = (remainingMillis + 999) / 1000
-                val remaining = remainingSeconds.coerceIn(0, AD_DURATION_SECONDS.toLong()).toInt()
-                adCountdownSeconds = remaining
-                if (remaining <= 0) {
-                    break
+            if (isActivityValid && isForeground && !isAdVisible) {
+                if (BuildConfig.DEBUG) {
+                    Toast.makeText(context, "TEST: AD TIMER REACHED", Toast.LENGTH_SHORT).show()
+                    Log.d("JAVANEH_AD", "Changing isAdVisible to true")
                 }
-                delay(100L) // Poll frequently to ensure absolute precision
+                isAdVisible = true
             }
-            
-            Log.d("JAVANEH_AD", "Countdown finished")
-            Log.d("JAVANEH_AD", "Ad closed")
-            showAdDialog = false
-            
-            // Cycle transitions
-            if (!isFirstAdShown) {
-                isFirstAdShown = true
-            }
-            elapsedActiveSeconds = 0
-            Log.d("JAVANEH_AD", "Next interval started")
         }
     }
 
-    val openJavaneyarUrl = {
-        try {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://javaneyar.ir/")).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            // Check if there is an app that can handle this intent safely
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            Toast.makeText(context, "مرورگری برای بازکردن سایت جوانه پیدا نشد.", Toast.LENGTH_SHORT).show()
+    val startNextInterval = {
+        isFirstAdShown = true
+        elapsedActiveMillis = 0L
+        if (BuildConfig.DEBUG) {
+            val nextDelay = REPEAT_AD_INTERVAL_MILLIS
+            Log.d("JAVANEH_AD", "Next delay selected: $nextDelay")
         }
-    }
-
-    val onAdClicked = {
-        openJavaneyarUrl()
     }
 
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
@@ -432,11 +382,12 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
         }
         
         // Show the Javaneyar Ad Dialog if triggered
-        if (showAdDialog) {
-            JavaneyarAdDialog(
-                onAdClicked = onAdClicked,
-                countdownSeconds = adCountdownSeconds,
-                imageBitmap = adImageBitmap
+        if (isAdVisible) {
+            JavanehAdDialog(
+                onFinished = {
+                    isAdVisible = false
+                    startNextInterval()
+                }
             )
         }
     }
@@ -452,11 +403,60 @@ fun NavigationBarItemColors() = NavigationBarItemDefaults.colors(
 )
 
 @Composable
-fun JavaneyarAdDialog(
-    onAdClicked: () -> Unit,
-    countdownSeconds: Int,
-    imageBitmap: ImageBitmap?
+fun JavanehAdDialog(
+    onFinished: () -> Unit
 ) {
+    val context = LocalContext.current
+    var countdownSeconds by remember { mutableStateOf(15) }
+
+    // Memory-Optimized Ad Image Loader (decodes only once per dialog show, prevents OOM)
+    val adImageBitmap = remember {
+        try {
+            val options = BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            BitmapFactory.decodeResource(context.resources, R.drawable.javaneh_ad_poster, options)
+            
+            if (options.outWidth <= 0 || options.outHeight <= 0) {
+                Log.e("JAVANEH_AD", "Error showing ad: image asset not found or invalid.")
+                null
+            } else {
+                options.inSampleSize = calculateInSampleSize(options, 600, 900)
+                options.inJustDecodeBounds = false
+                val bitmap = BitmapFactory.decodeResource(context.resources, R.drawable.javaneh_ad_poster, options)
+                bitmap?.asImageBitmap()
+            }
+        } catch (e: Throwable) {
+            Log.e("JAVANEH_AD", "Error showing ad: ${e.message}", e)
+            null
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (BuildConfig.DEBUG) {
+            Log.d("JAVANEH_AD", "Ad dialog composed")
+            Log.d("JAVANEH_AD", "Countdown started")
+        }
+        val startTime = SystemClock.elapsedRealtime()
+        val adEndTime = startTime + 15_000L
+        
+        while (countdownSeconds > 0) {
+            val now = SystemClock.elapsedRealtime()
+            val remainingMillis = adEndTime - now
+            val remaining = ((remainingMillis + 999) / 1000).coerceIn(0, 15).toInt()
+            countdownSeconds = remaining
+            if (remaining <= 0) {
+                break
+            }
+            delay(100L)
+        }
+        if (BuildConfig.DEBUG) {
+            Log.d("JAVANEH_AD", "Countdown finished")
+            Log.d("JAVANEH_AD", "Ad closed")
+        }
+        onFinished()
+    }
+
     Dialog(
         onDismissRequest = {}, // Empty lambda prevents dismissal on outside tap or back press
         properties = DialogProperties(
@@ -498,7 +498,7 @@ fun JavaneyarAdDialog(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         CircularProgressIndicator(
-                            progress = countdownSeconds / AD_DURATION_SECONDS.toFloat(),
+                            progress = countdownSeconds / 15f,
                             modifier = Modifier.size(18.dp).testTag("ad_progress_indicator"),
                             color = AccentGreen,
                             trackColor = Color.White.copy(alpha = 0.2f),
@@ -523,13 +523,22 @@ fun JavaneyarAdDialog(
                         .fillMaxWidth()
                         .padding(vertical = 8.dp)
                         .clip(RoundedCornerShape(16.dp))
-                        .clickable { onAdClicked() }
+                        .clickable {
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://javaneyar.ir/")).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "مرورگری برای بازکردن سایت جوانه پیدا نشد.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
                         .testTag("ad_image_card"),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (imageBitmap != null) {
+                    if (adImageBitmap != null) {
                         Image(
-                            bitmap = imageBitmap,
+                            bitmap = adImageBitmap,
                             contentDescription = "تبلیغ پلتفرم جوانه",
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Fit
@@ -554,26 +563,6 @@ fun JavaneyarAdDialog(
                 )
             }
         }
-    }
-}
-
-@Composable
-fun AdFeatureItem(emoji: String, title: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Color.White.copy(alpha = 0.05f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Text(text = emoji, fontSize = 18.sp)
-        Text(
-            text = title,
-            color = Color.White.copy(alpha = 0.9f),
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium
-        )
     }
 }
 
