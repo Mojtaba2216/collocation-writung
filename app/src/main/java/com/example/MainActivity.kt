@@ -93,11 +93,42 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.viewmodel.LeitnerViewModel
 import kotlinx.coroutines.delay
+import android.app.Activity
+import android.content.ContextWrapper
+import android.graphics.BitmapFactory
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import android.os.SystemClock
+import android.util.Log
 
 // Central Constants for Javaneyar Ad Timing
 const val AD_INTERVAL_MILLIS = 7 * 60 * 1000L // 420000 ms
 const val AD_INTERVAL_SECONDS = 7 * 60 // 420
 const val AD_DURATION_SECONDS = 15
+
+fun Context.findActivity(): Activity? {
+    var context = this
+    while (context is ContextWrapper) {
+        if (context is Activity) return context
+        context = context.baseContext
+    }
+    return null
+}
+
+fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
+    val (height: Int, width: Int) = options.outHeight to options.outWidth
+    var inSampleSize = 1
+
+    if (height > reqHeight || width > reqWidth) {
+        val halfHeight = height / 2
+        val halfWidth = width / 2
+
+        while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
+            inSampleSize *= 2
+        }
+    }
+    return inSampleSize
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -165,9 +196,10 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var isAppActive by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
     
-    var showAdDialog by remember { mutableStateOf(false) }
-    var isTestAd by remember { mutableStateOf(false) }
-    var adCountdownSeconds by remember { mutableStateOf(AD_DURATION_SECONDS) }
+    var showAdDialog by rememberSaveable { mutableStateOf(false) }
+    var isTestAd by rememberSaveable { mutableStateOf(false) }
+    var adCountdownSeconds by rememberSaveable { mutableStateOf(AD_DURATION_SECONDS) }
+    var isAdPending by rememberSaveable { mutableStateOf(false) }
 
     // Track App Foreground/Background state using active lifecycle state check
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -195,8 +227,16 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
                     if (now - lastAdShowTime >= AD_INTERVAL_MILLIS) {
                         // Ensure we are in a safe state (not rating/saving a card) before displaying the ad
                         if (!isRatingInProgress) {
-                            showAdDialog = true
-                            adCountdownSeconds = AD_DURATION_SECONDS
+                            val activity = context.findActivity()
+                            val isValid = activity != null && !activity.isFinishing && !activity.isDestroyed
+                            if (isValid) {
+                                showAdDialog = true
+                                adCountdownSeconds = AD_DURATION_SECONDS
+                            } else {
+                                isAdPending = true
+                            }
+                        } else {
+                            isAdPending = true
                         }
                     }
                 }
@@ -204,25 +244,86 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
         }
     }
 
+    // Observe state to trigger pending ad as soon as we are in a safe foreground state
+    LaunchedEffect(isAppActive, isRatingInProgress, isAdPending, showAdDialog) {
+        if (isAdPending && isAppActive && !isRatingInProgress && !showAdDialog) {
+            val now = System.currentTimeMillis()
+            if (now - lastAdShowTime >= AD_INTERVAL_MILLIS) {
+                val activity = context.findActivity()
+                val isValid = activity != null && !activity.isFinishing && !activity.isDestroyed
+                if (isValid) {
+                    isAdPending = false
+                    showAdDialog = true
+                    adCountdownSeconds = AD_DURATION_SECONDS
+                }
+            }
+        }
+    }
+
+    // Safe memory-optimized ad image loader
+    val adImageBitmap = remember(showAdDialog) {
+        if (!showAdDialog) null else {
+            try {
+                val options = BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true
+                }
+                BitmapFactory.decodeResource(context.resources, R.drawable.javaneh_ad_poster, options)
+                
+                if (options.outWidth <= 0 || options.outHeight <= 0) {
+                    Log.e("JavaneyarAd", "Ad image asset not found or invalid.")
+                    null
+                } else {
+                    options.inSampleSize = calculateInSampleSize(options, 512, 768)
+                    options.inJustDecodeBounds = false
+                    val bitmap = BitmapFactory.decodeResource(context.resources, R.drawable.javaneh_ad_poster, options)
+                    if (bitmap == null) {
+                        Log.e("JavaneyarAd", "Decoded bitmap is null.")
+                        null
+                    } else {
+                        bitmap.asImageBitmap()
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.e("JavaneyarAd", "Error loading ad image: ${e.message}", e)
+                null
+            }
+        }
+    }
+
+    // Automatically dismiss the ad dialog if the image cannot be loaded
+    LaunchedEffect(showAdDialog, adImageBitmap) {
+        if (showAdDialog && adImageBitmap == null) {
+            Log.e("JavaneyarAd", "Ad dialog triggered but asset is invalid or missing. Dismissing ad.")
+            showAdDialog = false
+            activeSeconds = 0
+            isAdPending = false
+        }
+    }
+
     // Ad countdown timer based on real system time (cannot be paused or bypassed by backgrounding)
     LaunchedEffect(showAdDialog) {
         if (showAdDialog) {
-            val startTime = System.currentTimeMillis()
+            val startTime = SystemClock.elapsedRealtime()
+            val adEndTime = startTime + 15_000L
+            
             if (!isTestAd) {
+                val realStartTime = System.currentTimeMillis()
                 // Save the last ad show time to SharedPreferences immediately when it shows
-                prefs.edit().putLong("last_ad_show_time", startTime).apply()
-                lastAdShowTime = startTime
+                prefs.edit().putLong("last_ad_show_time", realStartTime).apply()
+                lastAdShowTime = realStartTime
                 activeSeconds = 0 // Reset the active seconds timer for the next interval
             }
             
-            while (true) {
-                val elapsedSeconds = ((System.currentTimeMillis() - startTime) / 1000).toInt()
-                val remaining = (AD_DURATION_SECONDS - elapsedSeconds).coerceAtLeast(0)
+            while (showAdDialog) {
+                val now = SystemClock.elapsedRealtime()
+                val remainingMillis = adEndTime - now
+                val remainingSeconds = (remainingMillis + 999) / 1000
+                val remaining = remainingSeconds.coerceIn(0, 15).toInt()
                 adCountdownSeconds = remaining
                 if (remaining <= 0) {
                     break
                 }
-                delay(250L) // Poll frequently to ensure absolute precision
+                delay(100L) // Poll frequently to ensure absolute precision
             }
             // Auto dismiss when countdown reaches 0
             showAdDialog = false
@@ -231,8 +332,10 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
     }
 
     val openJavaneyarUrl = {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://javaneyar.ir/"))
         try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://javaneyar.ir/")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
             context.startActivity(intent)
         } catch (e: Exception) {
             Toast.makeText(context, "مرورگری برای بازکردن سایت جوانه پیدا نشد.", Toast.LENGTH_SHORT).show()
@@ -381,10 +484,11 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
         }
         
         // Show the Javaneyar Ad Dialog if triggered
-        if (showAdDialog) {
+        if (showAdDialog && adImageBitmap != null) {
             JavaneyarAdDialog(
                 onAdClicked = onAdClicked,
-                countdownSeconds = adCountdownSeconds
+                countdownSeconds = adCountdownSeconds,
+                imageBitmap = adImageBitmap
             )
         }
     }
@@ -402,7 +506,8 @@ fun NavigationBarItemColors() = NavigationBarItemDefaults.colors(
 @Composable
 fun JavaneyarAdDialog(
     onAdClicked: () -> Unit,
-    countdownSeconds: Int
+    countdownSeconds: Int,
+    imageBitmap: ImageBitmap
 ) {
     Dialog(
         onDismissRequest = {}, // Empty lambda prevents dismissal on outside tap or back press
@@ -419,38 +524,37 @@ fun JavaneyarAdDialog(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xEE0A0E17)) // Semi-transparent dark Navy-Black background
-                .safeDrawingPadding() // Ensure layout handles notches, status bars, and navigation bars safely
-                .padding(16.dp),
+                .background(Color.Black.copy(alpha = 0.95f))
+                .safeDrawingPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             contentAlignment = Alignment.Center
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .widthIn(max = 480.dp) // Ensure nice proportions on tablets and foldables
-                    .verticalScroll(rememberScrollState()), // Clean scroll fallback for ultra-small screens
+                    .fillMaxSize()
+                    .widthIn(max = 480.dp), // Max width to ensure nice proportion on tablets and foldables
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // Top Info Bar (Countdown + Progress)
-                Row(
+                // Top Info Bar (Semi-transparent small bar)
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 12.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(vertical = 4.dp)
+                        .background(Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    // Countdown and Progress
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         CircularProgressIndicator(
                             progress = countdownSeconds / AD_DURATION_SECONDS.toFloat(),
-                            modifier = Modifier.size(24.dp).testTag("ad_progress_indicator"),
+                            modifier = Modifier.size(18.dp).testTag("ad_progress_indicator"),
                             color = AccentGreen,
                             trackColor = Color.White.copy(alpha = 0.2f),
-                            strokeWidth = 2.5.dp
+                            strokeWidth = 2.dp
                         )
                         Text(
                             text = "این تبلیغ تا $countdownSeconds ثانیه دیگر بسته میشود",
@@ -465,30 +569,31 @@ fun JavaneyarAdDialog(
                 }
 
                 // Javaneyar Ad Poster Image
-                Card(
+                Box(
                     modifier = Modifier
+                        .weight(1f)
                         .fillMaxWidth()
+                        .padding(vertical = 8.dp)
                         .clip(RoundedCornerShape(16.dp))
                         .clickable { onAdClicked() }
                         .testTag("ad_image_card"),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+                    contentAlignment = Alignment.Center
                 ) {
                     Image(
-                        painter = painterResource(R.drawable.javaneh_ad_poster),
+                        bitmap = imageBitmap,
                         contentDescription = "تبلیغ پلتفرم جوانه",
-                        modifier = Modifier.fillMaxWidth(),
-                        contentScale = ContentScale.FillWidth
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit
                     )
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
-
+                // Bottom Brand Text
                 Text(
                     text = "javaneyar.ir",
                     color = Color.White.copy(alpha = 0.4f),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Light
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Light,
+                    modifier = Modifier.padding(bottom = 4.dp)
                 )
             }
         }
