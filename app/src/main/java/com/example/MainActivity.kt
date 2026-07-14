@@ -463,20 +463,7 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
                         ProgressScreen(
                             categories = viewModel.categories,
                             collocations = allCollocations,
-                            onResetProgress = { viewModel.resetProgress() },
-                            isDebug = com.example.BuildConfig.DEBUG,
-                            adControllerActive = isAppActive && !showAdDialog,
-                            adAssetLoaded = true,
-                            adVisible = showAdDialog,
-                            activeUsageSeconds = activeSeconds,
-                            remainingSecondsUntilNextAd = (AD_INTERVAL_SECONDS - activeSeconds).coerceAtLeast(0),
-                            lastAdShownTime = lastAdShowTime,
-                            currentAppLifecycleState = if (isAppActive) "foreground" else "background",
-                            onTriggerAdTest = {
-                                isTestAd = true
-                                showAdDialog = true
-                                adCountdownSeconds = AD_DURATION_SECONDS
-                            }
+                            onResetProgress = { viewModel.resetProgress() }
                         )
                     }
                 }

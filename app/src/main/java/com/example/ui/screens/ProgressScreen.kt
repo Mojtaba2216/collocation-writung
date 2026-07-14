@@ -70,16 +70,7 @@ fun ProgressScreen(
     categories: List<String>,
     collocations: List<Collocation>,
     onResetProgress: () -> Unit,
-    modifier: Modifier = Modifier,
-    isDebug: Boolean = false,
-    adControllerActive: Boolean = false,
-    adAssetLoaded: Boolean = false,
-    adVisible: Boolean = false,
-    activeUsageSeconds: Int = 0,
-    remainingSecondsUntilNextAd: Int = 0,
-    lastAdShownTime: Long = 0L,
-    currentAppLifecycleState: String = "",
-    onTriggerAdTest: () -> Unit = {}
+    modifier: Modifier = Modifier
 ) {
     var showResetDialog by remember { mutableStateOf(false) }
 
@@ -350,66 +341,6 @@ fun ProgressScreen(
                 }
             }
 
-            if (isDebug) {
-                item {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("debug_ad_card"),
-                        colors = CardDefaults.cardColors(containerColor = NavySurface),
-                        shape = RoundedCornerShape(16.dp),
-                        border = BorderStroke(width = 1.dp, color = AccentTeal.copy(alpha = 0.3f))
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp)
-                        ) {
-                            Text(
-                                text = "تنظیمات و دیباگ تبلیغ جوانه (Debug)",
-                                color = AccentTeal,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            
-                            // Button
-                            Button(
-                                onClick = onTriggerAdTest,
-                                colors = ButtonDefaults.buttonColors(containerColor = AccentTeal),
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .testTag("trigger_test_ad_btn")
-                            ) {
-                                Text(
-                                    text = "نمایش آزمایشی تبلیغ جوانه",
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                            
-                            Spacer(modifier = Modifier.height(16.dp))
-                            
-                            // Debug info lines
-                            DebugInfoLine(label = "Ad controller active", value = if (adControllerActive) "yes" else "no")
-                            DebugInfoLine(label = "Ad asset loaded", value = if (adAssetLoaded) "yes" else "no")
-                            DebugInfoLine(label = "Ad visible", value = if (adVisible) "yes" else "no")
-                            DebugInfoLine(label = "Active usage seconds", value = "$activeUsageSeconds")
-                            DebugInfoLine(label = "Remaining seconds until next ad", value = "$remainingSecondsUntilNextAd")
-                            
-                            val lastAdShownStr = if (lastAdShownTime == 0L) "no" else {
-                                val elapsedSec = (System.currentTimeMillis() - lastAdShownTime) / 1000
-                                "$elapsedSec seconds ago"
-                            }
-                            DebugInfoLine(label = "Last ad shown time", value = lastAdShownStr)
-                            DebugInfoLine(label = "Current app lifecycle state", value = currentAppLifecycleState)
-                        }
-                    }
-                }
-            }
-
             item { Spacer(modifier = Modifier.height(100.dp)) }
         }
 
@@ -496,16 +427,4 @@ fun RowProgressStat(
     }
 }
 
-@Composable
-fun DebugInfoLine(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(text = label, color = TextSecondary, fontSize = 11.sp)
-        Text(text = value, color = TextPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-    }
-}
+
