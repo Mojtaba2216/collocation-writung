@@ -102,9 +102,13 @@ import android.os.SystemClock
 import android.util.Log
 
 // Central Constants for Javaneyar Ad Timing
-const val AD_INTERVAL_MILLIS = 7 * 60 * 1000L // 420000 ms
-const val AD_INTERVAL_SECONDS = 7 * 60 // 420
+const val FIRST_AD_DELAY_SECONDS = 60 // 1 minute (60 seconds)
+const val REPEAT_AD_INTERVAL_SECONDS = 420 // 7 minutes (420 seconds)
 const val AD_DURATION_SECONDS = 15
+
+// Compatibility constants for existing tests
+const val AD_INTERVAL_SECONDS = 420
+const val AD_INTERVAL_MILLIS = 420000L
 
 fun Context.findActivity(): Activity? {
     var context = this
@@ -165,47 +169,60 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
 
     // Javaneyar Ad Timer Logic
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("javaneh_ad_prefs", Context.MODE_PRIVATE) }
     
-    var lastAdShowTime by rememberSaveable { mutableStateOf(prefs.getLong("last_ad_show_time", 0L)) }
-    var activeSeconds by rememberSaveable { mutableStateOf(prefs.getInt("active_seconds", 0)) }
-    
-    // Sanitize lastAdShowTime if corrupted/future and handle legacy activeSeconds non-destructively
-    LaunchedEffect(Unit) {
-        val now = System.currentTimeMillis()
-        if (lastAdShowTime > now) {
-            lastAdShowTime = 0L
-            prefs.edit().putLong("last_ad_show_time", 0L).apply()
+    // Session-level Ad state (preserved across configuration changes/rotations, reset on full app close)
+    var isFirstAdShown by rememberSaveable { mutableStateOf(false) }
+    var elapsedActiveSeconds by rememberSaveable { mutableStateOf(0) }
+    var showAdDialog by rememberSaveable { mutableStateOf(false) }
+    var adCountdownSeconds by rememberSaveable { mutableStateOf(AD_DURATION_SECONDS) }
+
+    // Memory-Optimized Ad Image Loader (decodes only once per dialog show, prevents OOM)
+    val adImageBitmap = remember(showAdDialog) {
+        if (!showAdDialog) null else {
+            try {
+                val options = BitmapFactory.Options().apply {
+                    inJustDecodeBounds = true
+                }
+                BitmapFactory.decodeResource(context.resources, R.drawable.javaneh_ad_poster, options)
+                
+                if (options.outWidth <= 0 || options.outHeight <= 0) {
+                    Log.e("JAVANEH_AD", "Error showing ad: image asset not found or invalid.")
+                    null
+                } else {
+                    options.inSampleSize = calculateInSampleSize(options, 600, 900)
+                    options.inJustDecodeBounds = false
+                    val bitmap = BitmapFactory.decodeResource(context.resources, R.drawable.javaneh_ad_poster, options)
+                    if (bitmap == null) {
+                        Log.e("JAVANEH_AD", "Error showing ad: decoded bitmap is null.")
+                        null
+                    } else {
+                        bitmap.asImageBitmap()
+                    }
+                }
+            } catch (e: Throwable) {
+                Log.e("JAVANEH_AD", "Error showing ad: ${e.message}", e)
+                null
+            }
         }
-        
-        if (activeSeconds < 0) {
-            activeSeconds = 0
-            prefs.edit().putInt("active_seconds", 0).apply()
-        } else if (activeSeconds >= AD_INTERVAL_SECONDS) {
-            // Cap slightly below interval (e.g. 10 seconds remaining) to ensure a smooth transition
-            activeSeconds = AD_INTERVAL_SECONDS - 10
-            prefs.edit().putInt("active_seconds", activeSeconds).apply()
-        }
-    }
-    
-    // Auto-persist active seconds whenever they increment
-    LaunchedEffect(activeSeconds) {
-        prefs.edit().putInt("active_seconds", activeSeconds).apply()
     }
     
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var isAppActive by remember { mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) }
-    
-    var showAdDialog by rememberSaveable { mutableStateOf(false) }
-    var isTestAd by rememberSaveable { mutableStateOf(false) }
-    var adCountdownSeconds by rememberSaveable { mutableStateOf(AD_DURATION_SECONDS) }
-    var isAdPending by rememberSaveable { mutableStateOf(false) }
 
-    // Track App Foreground/Background state using active lifecycle state check
+    // Track App Foreground/Background state and log
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, _ ->
+        val observer = LifecycleEventObserver { _, event ->
             isAppActive = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> {
+                    Log.d("JAVANEH_AD", "App resumed")
+                }
+                Lifecycle.Event.ON_PAUSE -> {
+                    Log.d("JAVANEH_AD", "App paused")
+                }
+                else -> {}
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
@@ -213,83 +230,64 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
         }
     }
 
-    // Active Timer (Increments every second only if app is active and ad is NOT showing)
-    LaunchedEffect(isAppActive, showAdDialog, isRatingInProgress) {
+    // Single Active Usage Timer Scheduler
+    LaunchedEffect(isAppActive, showAdDialog, isFirstAdShown) {
         if (isAppActive && !showAdDialog) {
+            Log.d("JAVANEH_AD", "Scheduler started")
             while (true) {
                 delay(1000L)
-                activeSeconds++
+                elapsedActiveSeconds++
                 
-                // Check if the required active use seconds have passed
-                if (activeSeconds >= AD_INTERVAL_SECONDS) {
-                    val now = System.currentTimeMillis()
-                    // Confirm that at least the interval has also passed in real-world time since last ad show
-                    if (now - lastAdShowTime >= AD_INTERVAL_MILLIS) {
-                        // Ensure we are in a safe state (not rating/saving a card) before displaying the ad
-                        if (!isRatingInProgress) {
-                            val activity = context.findActivity()
-                            val isValid = activity != null && !activity.isFinishing && !activity.isDestroyed
-                            if (isValid) {
-                                showAdDialog = true
-                                adCountdownSeconds = AD_DURATION_SECONDS
-                            } else {
-                                isAdPending = true
-                            }
-                        } else {
-                            isAdPending = true
-                        }
+                val currentTarget = if (!isFirstAdShown) FIRST_AD_DELAY_SECONDS else REPEAT_AD_INTERVAL_SECONDS
+                if (elapsedActiveSeconds >= currentTarget) {
+                    Log.d("JAVANEH_AD", "Interval reached")
+                    
+                    // Verify safe display conditions
+                    val activity = context.findActivity()
+                    val isValid = activity != null && !activity.isFinishing && !activity.isDestroyed
+                    
+                    if (isValid) {
+                        Log.d("JAVANEH_AD", "Showing ad")
+                        showAdDialog = true
+                        adCountdownSeconds = AD_DURATION_SECONDS
+                    } else {
+                        Log.e("JAVANEH_AD", "Error showing ad: activity not valid")
                     }
                 }
             }
         }
     }
 
-    // Observe state to trigger pending ad as soon as we are in a safe foreground state
-    LaunchedEffect(isAppActive, isRatingInProgress, isAdPending, showAdDialog) {
-        if (isAdPending && isAppActive && !isRatingInProgress && !showAdDialog) {
-            val now = System.currentTimeMillis()
-            if (now - lastAdShowTime >= AD_INTERVAL_MILLIS) {
-                val activity = context.findActivity()
-                val isValid = activity != null && !activity.isFinishing && !activity.isDestroyed
-                if (isValid) {
-                    isAdPending = false
-                    showAdDialog = true
-                    adCountdownSeconds = AD_DURATION_SECONDS
-                }
-            }
-        }
-    }
-
-
-
-    // Ad countdown timer based on real system time (cannot be paused or bypassed by backgrounding)
+    // Ad countdown timer using SystemClock.elapsedRealtime (robust, cannot be bypassed by backgrounding)
     LaunchedEffect(showAdDialog) {
         if (showAdDialog) {
+            Log.d("JAVANEH_AD", "Dialog composed")
+            Log.d("JAVANEH_AD", "Countdown started")
             val startTime = SystemClock.elapsedRealtime()
-            val adEndTime = startTime + 15_000L
-            
-            if (!isTestAd) {
-                val realStartTime = System.currentTimeMillis()
-                // Save the last ad show time to SharedPreferences immediately when it shows
-                prefs.edit().putLong("last_ad_show_time", realStartTime).apply()
-                lastAdShowTime = realStartTime
-                activeSeconds = 0 // Reset the active seconds timer for the next interval
-            }
+            val adEndTime = startTime + AD_DURATION_SECONDS * 1000L
             
             while (showAdDialog) {
                 val now = SystemClock.elapsedRealtime()
                 val remainingMillis = adEndTime - now
                 val remainingSeconds = (remainingMillis + 999) / 1000
-                val remaining = remainingSeconds.coerceIn(0, 15).toInt()
+                val remaining = remainingSeconds.coerceIn(0, AD_DURATION_SECONDS.toLong()).toInt()
                 adCountdownSeconds = remaining
                 if (remaining <= 0) {
                     break
                 }
                 delay(100L) // Poll frequently to ensure absolute precision
             }
-            // Auto dismiss when countdown reaches 0
+            
+            Log.d("JAVANEH_AD", "Countdown finished")
+            Log.d("JAVANEH_AD", "Ad closed")
             showAdDialog = false
-            isTestAd = false
+            
+            // Cycle transitions
+            if (!isFirstAdShown) {
+                isFirstAdShown = true
+            }
+            elapsedActiveSeconds = 0
+            Log.d("JAVANEH_AD", "Next interval started")
         }
     }
 
@@ -298,6 +296,7 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
             val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://javaneyar.ir/")).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+            // Check if there is an app that can handle this intent safely
             context.startActivity(intent)
         } catch (e: Exception) {
             Toast.makeText(context, "مرورگری برای بازکردن سایت جوانه پیدا نشد.", Toast.LENGTH_SHORT).show()
@@ -436,7 +435,8 @@ fun MainAppContainer(viewModel: LeitnerViewModel) {
         if (showAdDialog) {
             JavaneyarAdDialog(
                 onAdClicked = onAdClicked,
-                countdownSeconds = adCountdownSeconds
+                countdownSeconds = adCountdownSeconds,
+                imageBitmap = adImageBitmap
             )
         }
     }
@@ -454,7 +454,8 @@ fun NavigationBarItemColors() = NavigationBarItemDefaults.colors(
 @Composable
 fun JavaneyarAdDialog(
     onAdClicked: () -> Unit,
-    countdownSeconds: Int
+    countdownSeconds: Int,
+    imageBitmap: ImageBitmap?
 ) {
     Dialog(
         onDismissRequest = {}, // Empty lambda prevents dismissal on outside tap or back press
@@ -526,12 +527,21 @@ fun JavaneyarAdDialog(
                         .testTag("ad_image_card"),
                     contentAlignment = Alignment.Center
                 ) {
-                    Image(
-                        painter = painterResource(R.drawable.javaneh_ad_poster),
-                        contentDescription = "تبلیغ پلتفرم جوانه",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Fit
-                    )
+                    if (imageBitmap != null) {
+                        Image(
+                            bitmap = imageBitmap,
+                            contentDescription = "تبلیغ پلتفرم جوانه",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    } else {
+                        Image(
+                            painter = painterResource(R.drawable.javaneh_ad_poster),
+                            contentDescription = "تبلیغ پلتفرم جوانه",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit
+                        )
+                    }
                 }
 
                 // Bottom Brand Text
